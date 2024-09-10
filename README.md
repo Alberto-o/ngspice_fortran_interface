@@ -3,7 +3,9 @@
 Interface and wrapper functions to use ngSpice as an external library.
 
 ## src ## 
-*ngspice_interface.F90* contains the bindings to the shared functions used. *circuit.F90* defines a type, **circuit_t**, and a series of wrapper functions to hide the direct use of the interfaced functions. 
+
+*ngspice_interface.F90* , *ngspice_interface.c* and *ngspice_interface.h* define the bindings to the shared functions.
+*circuit.F90* defines a type, **circuit_t**, to hold information of the circuit, and a series of wrapper auxiliary functions to operate on the circuit hiding the direct use of the interfaced *c* functions. 
 
 ## test ##
 

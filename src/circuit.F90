@@ -3,104 +3,199 @@ module circuit_mod
     use ngspice_interface_mod
     implicit none
 
+    integer, parameter :: SOURCE_TYPE_UNDEFINED = -1
+    integer, parameter :: SOURCE_TYPE_VOLTAGE   =  1
+    integer, parameter :: SOURCE_TYPE_CURRENT   =  2
+ 
+    type node_source_t
+        character(len=256) :: path_to_excitation = ""
+        integer :: source_type = SOURCE_TYPE_UNDEFINED
+     end type
+
     type string_t
-        character(len=100) :: name
+        character(len=256) :: name
         integer :: length
     end type string_t
 
+    type source_t
+        logical :: has_source = .false.
+        real, dimension(:), allocatable :: time
+        real, dimension(:), allocatable :: value
+        integer :: source_type
+    contains 
+        procedure :: interpolate
+    end type
+
+    type VI_t
+        real :: voltage
+        real :: current
+        real :: time
+    end type
+
     type nodes_t
-        real, allocatable :: values(:)
-        type(string_t), allocatable :: tags(:)
-    
+        type(VI_T), allocatable :: values(:)
+        type(source_t), allocatable :: sources(:)
+        type(string_t), allocatable :: names(:)
     end type nodes_t
 
     type, public :: circuit_t
-    character (len=:), allocatable :: name
-    real :: time = 0.0, dt = 0.0
-    logical :: errorFlag = .false.
-    type(nodes_t) :: nodes   
+        character (len=:), allocatable :: name
+        real :: time = 0.0, dt = 0.0
+        logical :: errorFlag = .false.
+        type(nodes_t) :: nodes, saved_nodes   
 
     contains
         procedure :: init
         procedure :: run
         procedure :: step
-        procedure :: resume
-        procedure :: loadNetlist
-        procedure :: print
-        procedure :: command
-        procedure :: isRunning
+        procedure, private :: resume
+        procedure :: quit
+        procedure, private :: loadNetlist
+        procedure :: readInput
+        procedure :: setStopTimes
         procedure :: getNodeVoltage
+        procedure :: getNodeCurrent
+        procedure :: updateNodes
         procedure :: getTime
+        procedure :: updateNodeCurrent
+        procedure :: updateCircuitSources
 
     end type circuit_t
 
 contains
 
-    subroutine init(this, netlist)
-        class(circuit_t) :: this
-        character(len=*), intent(in) :: netlist
-        integer :: res
+    real function interpolate(this, time, dt) result(res)
+        class(source_t) :: this
+        real :: time, dt, x1,x2, y1, y2
+        integer :: index
+        real, dimension(:), allocatable :: timediff
+        timediff = this%time - time + dt
+        index = maxloc(timediff, 1, (timediff) <= 0)
+        if (index == 0) index = 1
+        x1 = this%time(index)
+        y1 = this%value(index)
+        if (index+1 > size(this%time)) then
+            x2 = x1
+            y2 = y1
+        else 
+            x2 = this%time(index+1)
+            y2 = this%value(index+1)
+        end if
+                
+        res = (time*(y2-y1) + x2*y1 - x1*y2)/(x2-x1)
+    end function
 
-        res = ngSpice_Init(c_funloc(SendChar), &
-                           c_funloc(SendStat), & 
-                           c_funloc(ControlledExit), & 
-                           c_funloc(SendData), &
-                           c_funloc(SendInitData), &
-                           c_funloc(BGThreadRunning), &
-                           this%nodes)
-  
-        call this%loadNetlist(netlist)
-        write(*,*) 'Init'
+    subroutine init(this, names, sources, netlist)
+        class(circuit_t) :: this
+        type(string_t), intent(in), dimension(:), optional :: names
+        type(node_source_t), intent(in), dimension(:), optional :: sources
+        character(len=*), intent(in), optional :: netlist
+        integer :: i
+
+        call start()
+        if (present(netlist)) then
+            call this%loadNetlist(netlist)
+        end if
+
+        if (.not.present(names)) then 
+            error stop 'Missing node names'
+        end if
+
+        allocate(this%nodes%names(size(names)))
+        allocate(this%nodes%values(size(names)))
+
     end subroutine
+
+    type(source_t) function setSource(source_path) result(res)
+        character(*), intent(in) :: source_path
+        real :: time, value
+        integer :: io
+        allocate(res%time(0), res%value(0))
+        if (source_path /= "" ) then 
+            res%has_source = .true.
+            open(unit = 1, file = source_path)
+            do
+                read(1, *, iostat = io) time, value
+                if (io /= 0) exit
+                res%time = [res%time, time]
+                res%value = [res%value, value]
+            end do
+        end if
+    end function    
 
     subroutine loadNetlist(this, netlist)
         class(circuit_t) :: this
-        character(len=*), intent(in) :: netlist
-        integer :: res
-        res = ngSpice_Command('source ' // netlist // c_null_char)
+        character(len=*, kind=c_char), intent(in) :: netlist
+        call command(c_char_'source ' // trim(netlist) // c_null_char)
     end subroutine
 
     subroutine step(this)
         class(circuit_t) :: this
+        call this%updateCircuitSources(this%time)
         if (this%time == 0) then
             call this%run()
         else
             call this%resume()
         end if
+        call this%updateNodes()
 
     end subroutine
 
     subroutine run(this)
         class(circuit_t) :: this
-        integer :: out
-        out = ngSpice_Command('run ' // c_null_char)
+        call command('run ' // c_null_char)
     end subroutine
 
-    function isRunning(this) result(res)
+    subroutine setStopTimes(this, finalTime, dt)
         class(circuit_t) :: this
-        logical :: res
-        res = ngSpice_running()
-    end function
+        real, intent(in) :: finalTime, dt
+        character(20) :: charTime
+        real :: time
+
+        time = 0.0
+        do while (time < finalTime)
+            time = time + dt
+            write(charTime, *) time
+            call command('stop when time = '//charTime // c_null_char)
+        end do
+    end subroutine
 
     subroutine resume(this)
         class(circuit_t) :: this
-        integer :: out
-        out = ngSpice_Command('resume ' // c_null_char)
+        call command('resume ' // c_null_char)
     end subroutine
 
-    subroutine print(this)
+    subroutine quit(this)
         class(circuit_t) :: this
-        integer :: out
-        out = ngSpice_Command('print all'// c_null_char)
+        call command('quit 0' // c_null_char)
     end subroutine
 
-    subroutine command(this, line)
+    subroutine readInput(this, input, printInput) 
         class(circuit_t) :: this
-        character(len=*), intent(in) :: line
-        integer :: out
-        out = ngSpice_Command(line // c_null_char)
-    end subroutine
+        character(*), intent(in) :: input(:)
+        logical, optional :: printInput
+        type(c_ptr) :: argv_c(size(input))
+        integer :: i   
 
+        type string
+            character(len=:,kind=c_char), allocatable :: item
+        end type string
+        type(string), target :: tmp(size(input))
+
+        if (present(printInput)) then
+            if (printInput .eqv. .true.) then 
+                do i = 1 , size(input)
+                    write(*,*) input(i)
+                end do
+            end if
+        end if
+
+        do i = 1, size(input)
+            tmp(i)%item = trim(input(i)) // c_null_char
+            argv_c(i) = c_loc(tmp(i)%item)
+        end do
+        call circ(argv_c)
+    end subroutine
 
     function getName(cName) result(res)
         type(c_ptr) :: cName
@@ -118,134 +213,82 @@ contains
 
     end function
 
+    subroutine updateNodeCurrent(this, node_name, current)
+        class(circuit_t) :: this
+        real :: current
+        character(20) :: sCurrent
+        character(*) :: node_name
+        if (index(node_name, "initial") /= 0) then
+            write(sCurrent, *) current
+        else if (index(node_name, "end") /= 0) then
+            write(sCurrent, *) -current
+        end if
+        call command("alter @I"//trim(node_name)//"[dc] = "//trim(sCurrent) // c_null_char)
+    end subroutine
+
+    subroutine updateNodes(this) 
+        class(circuit_t) :: this
+        integer :: i
+        type(vectorInfo), pointer :: info
+        real(kind=c_double), pointer :: values(:)
+        do i = 1, size(this%nodes%names)
+            call c_f_pointer(get_vector_info(trim(this%nodes%names(i)%name)//c_null_char), info)
+            call c_f_pointer(info%vRealData, values,shape=[info%vLength])
+            if (this%nodes%names(i)%name /= "time") then 
+                this%nodes%values(i)%voltage = values(ubound(values,1))
+            else 
+                this%nodes%values(i)%time = values(ubound(values,1))
+            end if
+        end do
+    end subroutine
+
     function getNodeVoltage(this, name) result(res)
         class(circuit_t) :: this
         character(len=*), intent(in) :: name
         real :: res
-        res = this%nodes%values(findVoltageIndexByName(this%nodes%tags, name))
+        res = this%nodes%values(findVoltageIndexByName(this%nodes%names, name))%voltage
+    end function
+
+    function getNodeCurrent(this, name) result(res)
+        class(circuit_t) :: this
+        character(len=*), intent(in) :: name
+        real :: res
+        res = this%nodes%values(findVoltageIndexByName(this%nodes%names, name))%current
     end function
 
     function getTime(this) result(res)
         class(circuit_t) :: this
         real :: res
-        res = this%nodes%values(findIndexByName(this%nodes%tags, "time"))
+        res = this%nodes%values(findIndexByName(this%nodes%names, "time"))%time
     end function
 
-    function findIndexByName(tags, name) result(res)
-        type(string_t) :: tags(:)
+    function findIndexByName(names, name) result(res)
+        type(string_t) :: names(:)
         character(len=*), intent(in) :: name
         integer :: res, i
         res = 0
-        do i = 1, size(tags)
-            if ( tags(i)%name(1:tags(i)%length) == trim(name)) then 
+        do i = 1, size(names)
+            if ( names(i)%name(1:names(i)%length) == trim(name)) then 
                 res = i
                 exit
             end if
         end do
     end function    
 
-    function findVoltageIndexByName(tags, name) result(res)
-        type(string_t) :: tags(:)
+    function findVoltageIndexByName(names, name) result(res)
+        type(string_t) :: names(:)
         character(len=*), intent(in) :: name
         integer :: res, i
         res = 0
-        do i = 1, size(tags)
-            if ( tags(i)%name(1:tags(i)%length) == 'V('//trim(name)//')') then 
+        do i = 1, size(names)
+            if ( names(i)%name(1:names(i)%length) == 'V('//trim(name)//')') then 
+                res = i
+                exit
+            else if ( names(i)%name(1:names(i)%length) == trim(name)) then 
                 res = i
                 exit
             end if
         end do
     end function    
-
-    integer(c_int) function SendChar(output, id, nodes)
-        type(c_ptr), value, intent(in) :: output
-        integer(c_int), intent(in), value :: id
-        type(nodes_t) :: nodes
-        character(len=:), pointer :: f_output
-        character(len=:), allocatable :: string
-
-        SendChar = 0
-        call c_f_pointer(output, f_output)
-        string = f_output(1:index(f_output, c_null_char)-1)
-        write(*,*) trim(string)
-        if (index('stderr', string) /= 0) then
-            SendChar = 1
-        end if
-    end function
-
-    integer(c_int) function SendStat(status, id, nodes)
-        type(c_ptr), value, intent(in) :: status
-        integer(c_int), intent(in), value :: id
-        type(nodes_t) :: nodes
-        character(len=:), pointer :: f_output
-        character(len=:), allocatable :: string
-
-        call c_f_pointer(status, f_output)
-        string = f_output(1:index(f_output, c_null_char)-1)
-        write(*,*) trim(string)
-    end function
-
-    integer(c_int) function ControlledExit(status, unloadDll, exitOnQuit, id, nodes)
-        logical(c_bool), intent(in) :: unloadDll, exitOnQuit
-        integer(c_int), intent(in), value :: status, id
-        type(nodes_t) :: nodes
-
-        integer :: res
-        if (exitOnQuit .eqv. .true.) then
-            write(*,*) 'ControlledExit: Returned form quit with exit status ', status
-            call exit(status)
-        else if (unloadDll .eqv. .true.) then 
-            write(*,*) "ControlledExit: Unloading ngspice inmmediately is not possible"
-            write(*,*) "ControlledExit: Can we recover?"
-        else
-            write(*,*) "ControlledExit: Unloading ngspice is not possible"
-            write(*,*) "ControlledExit: Can we recover? Send 'quit' command to ngspice"
-            res = ngSpice_Command("quit 5")
-        end if
-
-    end function
-
-    integer(c_int) function SendData(data, numberOfStructs, id, nodes)
-        type(c_ptr), value, intent(in) :: data
-        type(nodes_t) :: nodes
-        integer(c_int), value :: numberOfStructs, id
-
-        type(vecValuesAll), pointer :: valuesAll
-        type(c_ptr), pointer :: values(:)
-        type(vecValuesArray), allocatable :: vecsaPtr(:) ! array of pointers to type(c_ptr)
-        integer :: i
-        
-        call c_f_pointer(data, valuesAll) 
-        call c_f_pointer(valuesAll%vecsa, values, [valuesAll%vecCount])
-        allocate(vecsaPtr(valuesAll%vecCount))
-
-        if (.not.allocated(nodes%values)) then 
-            allocate(nodes%values(valuesAll%vecCount))
-            allocate(nodes%indices(valuesAll%vecCount))
-            allocate(nodes%tags(valuesAll%vecCount))
-        end if  
-        
-        do i = 1, valuesAll%vecCount
-            call c_f_pointer(values(i), vecsaPtr(i)%vecValuesPtr)
-            nodes%values(i) = vecsaPtr(i)%vecValuesPtr%cReal
-            nodes%tags(i) = getName(vecsaPtr(i)%vecValuesPtr%name)
-        end do
-        call c_f_pointer(values(valuesAll%vecCount), vecsaPtr(valuesAll%vecCount)%vecValuesPtr)
-
-    end function
-
-
-    integer(c_int) function SendInitData(initData, id, nodes)
-        integer(c_int), value :: id
-        type(vecInOfAll), pointer, intent(in) :: initData
-        type(nodes_t) :: nodes
-    end function
-
-    integer(c_int) function BGThreadRunning(isBGThreadNotRunning, id, nodes)
-        logical(c_bool) :: isBGThreadNotRunning
-        integer(c_int), value :: id
-        type(nodes_t) :: nodes
-    end function
-
 
 end module 

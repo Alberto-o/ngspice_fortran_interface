@@ -1,6 +1,9 @@
-# ngSpice FORTRAN interface
+# Ngspice FORTRAN interface
 
-Interface and wrapper functions to use ngSpice as an external library.
+[Ngspice](https://ngspice.sourceforge.io/) is a state-of-the-art mixed signal-mixed level circuit solver. Ngspice is written in C and can be compiled as a shared library to be used from other programs. 
+This project is a C-Fortran interface to be able to use ngspice shared functions from a Fortran project. Besides the interface, which defines the bare minimum bindings to interface with ngspice functions, there are a series of auxiliry functions to do some of the operations needed when defining a ngspice circuit and operating within: iniatiating the circuit, reading a netlist, invoking commands, reading voltage from nodes, setting time steps in a transient analysis, etc
+
+The content of the repository is as follows:
 
 ## src ## 
 
